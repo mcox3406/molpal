@@ -1,10 +1,10 @@
 import sys
 
-from pytorch_lightning.callbacks import ProgressBarBase
+from lightning.pytorch.callbacks import Callback
 from tqdm import tqdm
 
 
-class EpochAndStepProgressBar(ProgressBarBase):
+class EpochAndStepProgressBar(Callback):
     def __init__(self, refresh_rate: int = 100):
         super().__init__()
         self.step_bar = None
@@ -22,7 +22,7 @@ class EpochAndStepProgressBar(ProgressBarBase):
             unit="step",
             leave=False,
             dynamic_ncols=True,
-            total=self.total_train_batches + self.total_val_batches,
+            total=trainer.estimated_stepping_batches,
         )
 
     def on_train_epoch_start(self, trainer, pl_module):
@@ -34,8 +34,12 @@ class EpochAndStepProgressBar(ProgressBarBase):
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
         super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
 
-        # loss = trainer.progress_bar_dict["loss"]
-        loss = self.get_metrics(trainer, pl_module)["loss"]
+        # loss handling - extract from outputs
+        if isinstance(outputs, dict) and "loss" in outputs:
+            loss = outputs["loss"].item()
+        else:
+            loss = outputs.item() if hasattr(outputs, "item") else 0.0
+        
         self.step_bar.set_postfix_str(f"loss={loss}")
         self.step_bar.update()
 
@@ -47,7 +51,7 @@ class EpochAndStepProgressBar(ProgressBarBase):
         self.step_bar.set_description_str("Epoch (validation)", True)
 
     def on_validation_batch_end(
-        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx
+        self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0
     ):
         super().on_validation_batch_end(
             trainer, pl_module, outputs, batch, batch_idx, dataloader_idx
@@ -58,7 +62,6 @@ class EpochAndStepProgressBar(ProgressBarBase):
         self.step_bar.update()
 
     def on_validation_epoch_end(self, trainer, pl_module):
-        super().on_validation_end(trainer, pl_module)
         if self.sanity_checking:
             return
 

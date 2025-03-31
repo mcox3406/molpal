@@ -10,10 +10,17 @@ from typing import Iterable, List, NoReturn, Optional, Sequence, Tuple
 import warnings
 
 import numpy as np
-from pytorch_lightning import Trainer as PlTrainer
-from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+from lightning.pytorch import Trainer as PlTrainer
+from lightning.pytorch.callbacks.early_stopping import EarlyStopping
 import ray
-from ray.train import Trainer as RayTrainer
+from ray.train.torch import TorchTrainer
+from ray.train import ScalingConfig, Checkpoint
+from ray.train.lightning import (
+    RayDDPStrategy,
+    RayLightningEnvironment,
+    RayTrainReportCallback,
+    prepare_trainer
+)
 import torch
 from tqdm import tqdm
 
@@ -98,6 +105,7 @@ class MPNN:
         ddp: bool = False,
         precision: int = 32,
         model_seed: Optional[int] = None,
+        num_workers: Optional[int] = None,
     ):
         self.ncpu = ncpu
         self.ddp = ddp
@@ -128,16 +136,26 @@ class MPNN:
         self.batch_size = batch_size
 
         self.scaler = None
+        
+        # initialize Ray if it's not already initialized
+        if not ray.is_initialized():
+            ray.init()
 
         ngpu = int(ray.cluster_resources().get("GPU", 0))
         if ngpu > 0:
             self.use_gpu = True
             self._predict = mpnn.predict_.options(num_cpus=ncpu, num_gpus=1)
-            self.num_workers = ngpu
+            self.num_workers = num_workers if num_workers is not None else ngpu
         else:
             self.use_gpu = False
             self._predict = mpnn.predict_.options(num_cpus=ncpu)
-            self.num_workers = int(ray.cluster_resources()["CPU"] // self.ncpu)
+            # if num_workers is explicitly set, use that
+            # otherwise calculate based on available CPUs
+            if num_workers is not None:
+                self.num_workers = num_workers
+            else:
+                total_cpus = int(ray.cluster_resources()["CPU"])
+                self.num_workers = max(1, total_cpus // self.ncpu)
 
         self.seed = model_seed
         if model_seed is not None:
@@ -161,23 +179,84 @@ class MPNN:
         train_data, val_data = self.make_datasets(smis, targets)
 
         if self.ddp:
-            self.train_config["train_data"] = train_data
-            self.train_config["val_data"] = val_data
-
-            callbacks = [mpnn.ray.TqdmCallback(self.epochs)]
-            trainer = RayTrainer("torch", self.num_workers, self.use_gpu, {"CPU": self.ncpu})
-            trainer.start()
-            results = trainer.run(mpnn.ray.train_func, self.train_config, callbacks)
-            trainer.shutdown()
-
-            self.model = results[0]
-
+            def train_func_lightning():
+                train_dataloader = MoleculeDataLoader(
+                    train_data, self.batch_size, self.ncpu, pin_memory=False
+                )
+                val_dataloader = MoleculeDataLoader(
+                    val_data, self.batch_size, self.ncpu, pin_memory=False
+                )
+                
+                lit_model = mpnn.ptl.LitMPNN(self.train_config)
+                
+                trainer = PlTrainer(
+                    logger=False,
+                    max_epochs=self.epochs,
+                    callbacks=[
+                        EarlyStopping("val_loss", patience=10, mode="min"),
+                        RayTrainReportCallback(),
+                    ],
+                    devices="auto",
+                    accelerator="cpu",  # force CPU accelerator to avoid MPS issues with DDP (switch to "auto"/"gpu" for GPU)
+                    strategy=RayDDPStrategy(),
+                    plugins=[RayLightningEnvironment()],
+                    precision=self.precision,
+                    enable_model_summary=False,
+                    enable_checkpointing=True,
+                )
+                
+                trainer = prepare_trainer(trainer)
+                
+                trainer.fit(lit_model, train_dataloader, val_dataloader)
+                
+                return lit_model.mpnn.state_dict()
+            
+            scaling_config = ScalingConfig(
+                num_workers=self.num_workers,
+                use_gpu=self.use_gpu,
+                resources_per_worker={"CPU": self.ncpu}
+            )
+            
+            trainer = TorchTrainer(
+                train_func_lightning,
+                scaling_config=scaling_config
+            )
+            
+            results = trainer.fit()
+            
+            if results.checkpoint:
+                with results.checkpoint.as_directory() as checkpoint_dir:
+                    import os
+                    from pathlib import Path
+                    
+                    checkpoint_files = list(Path(checkpoint_dir).glob("*.ckpt"))
+                    if checkpoint_files:
+                        checkpoint_path = checkpoint_files[0]
+                        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+                        
+                        state_dict = checkpoint["state_dict"]
+                        fixed_state_dict = {}
+                        
+                        for key, value in state_dict.items():
+                            if key.startswith("mpnn."):
+                                fixed_key = key[5:]
+                                fixed_state_dict[fixed_key] = value
+                            else:
+                                fixed_state_dict[key] = value
+                        
+                        self.model.load_state_dict(fixed_state_dict)
+                    else:
+                        print("Warning: No checkpoint file found")
+            
             return True
 
+        # non-distributed training path
         train_dataloader = MoleculeDataLoader(
-            train_data, self.batch_size, self.ncpu, pin_memory=False
+            train_data, self.batch_size, self.ncpu, pin_memory=False, persistent_workers=True
         )
-        val_dataloader = MoleculeDataLoader(val_data, self.batch_size, self.ncpu, pin_memory=False)
+        val_dataloader = MoleculeDataLoader(
+            val_data, self.batch_size, self.ncpu, pin_memory=False, shuffle=False, persistent_workers=True
+        )
 
         lit_model = mpnn.ptl.LitMPNN(self.train_config)
 
@@ -189,12 +268,15 @@ class MPNN:
             logger=False,
             max_epochs=self.epochs,
             callbacks=callbacks,
-            gpus=1 if self.use_gpu else 0,
+            accelerator="gpu" if self.use_gpu else "cpu",
+            devices=1,
             precision=self.precision,
             enable_model_summary=False,
             enable_checkpointing=False,  # TODO: reimplement trainer checkpointing later
         )
         trainer.fit(lit_model, train_dataloader, val_dataloader)
+        
+        self.model.load_state_dict(lit_model.mpnn.state_dict())
 
         return True
 

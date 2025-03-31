@@ -1,5 +1,6 @@
 """This module contains the Explorer class, which is an abstraction for batch Bayesian
 optimization."""
+from __future__ import annotations
 from collections.abc import Iterable
 import csv
 import heapq
@@ -332,10 +333,14 @@ class Explorer:
             f"FINAL TOP-{self.k} AVE: {self.top_k_avg:0.3f} | "
             f"FINAL BUDGET: {len(self)}/{self.budget}."
         )
+        
         print("Final averages")
         print("--------------")
         for k in [0.0001, 0.0005, 0.001, 0.005]:
-            print(f"TOP-{k:0.2%}: {self.avg(k):0.3f}")
+            # only try to print if we have enough scores for this percentage
+            # this should never be an issue in production, but is an issue when testing small datasets
+            if k * self.full_pool_size >= 1 or len(self.scores) >= 1:
+                print(f"TOP-{k:0.2%}: {self.avg(k):0.3f}")
 
         self.write_scores(final=True)
 
@@ -477,6 +482,10 @@ class Explorer:
             k = int(k * self.full_pool_size)
         k = min(k, len(self.scores))
 
+        if k <= 0:
+            print("Warning: k <= 0! Returning 0.0. You should only be seeing this if you are testing a very small dataset.")
+            return 0.0
+
         if k == len(self.scores):
             return sum(score or 0 for _, score in self.scores.items()) / k
 
@@ -502,7 +511,7 @@ class Explorer:
         n = n or self.k
         if isinstance(n, float):
             n = int(n * self.full_pool_size)
-        n = min(n, len(self.scores))
+        n = max(1, min(n, len(self.scores)))
 
         if n / len(self.scores) < 0.3:
             top_explored = heapq.nlargest(

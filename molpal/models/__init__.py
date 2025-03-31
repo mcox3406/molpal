@@ -3,8 +3,14 @@ model is used to predict an input's objective function based on prior
 training data."""
 
 from typing import Optional, Set
+import os
 
-import pytorch_lightning
+try:
+    import lightning.pytorch
+    USE_CUDA = os.environ.get("CUDA_VISIBLE_DEVICES")
+except ModuleNotFoundError:
+    USE_CUDA = False
+
 from molpal.models.base import Model
 
 

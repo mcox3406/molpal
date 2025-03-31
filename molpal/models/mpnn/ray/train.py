@@ -1,13 +1,13 @@
 from typing import Dict
 
-from ray import train
-import ray.train.torch  # noqa: F401
 import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.optim import Adam, Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from torch.utils.data import DataLoader
+import ray
+from ray.train import report, Checkpoint
 
 from molpal.models import mpnn
 from molpal.models.chemprop.data.data import construct_molecule_batch
@@ -107,14 +107,12 @@ def train_func(config: Dict):
     train_loader = DataLoader(
         train_data,
         batch_size,
-        # sampler=DistributedSampler(train_data),
         num_workers=ncpu,
         collate_fn=construct_molecule_batch,
     )
     val_loader = DataLoader(
         val_data,
         batch_size,
-        # sampler=DistributedSampler(val_data),
         num_workers=ncpu,
         collate_fn=construct_molecule_batch,
     )
@@ -135,9 +133,15 @@ def train_func(config: Dict):
         "rmse": lambda X, Y: torch.sqrt(F.mse_loss(X, Y, reduction="none")),
     }[metric]
 
-    model = train.torch.prepare_model(model)
-    train_loader = train.torch.prepare_data_loader(train_loader)
-    val_loader = train.torch.prepare_data_loader(val_loader)
+    # Prepare for distributed training
+    from ray.train.torch import prepare_model, prepare_data_loader
+
+    model = prepare_model(model)
+    train_loader = prepare_data_loader(train_loader)
+    val_loader = prepare_data_loader(val_loader)
+
+    best_val_loss = float("inf")
+    best_model_state = None
 
     for i in range(max_epochs):
         train_res = train_epoch(train_loader, model, criterion, optimizer, scheduler, uncertainty)
@@ -145,7 +149,31 @@ def train_func(config: Dict):
 
         train_loss = train_res["loss"]
         val_loss = val_res["loss"]
+        
+        # Save checkpoint if this is the best model so far
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model_state = model.state_dict()
+            
+            # Create a temporary checkpoint to report
+            import io
+            import os
+            import tempfile
+            
+            with tempfile.TemporaryDirectory() as temp_checkpoint_dir:
+                checkpoint_path = os.path.join(temp_checkpoint_dir, "model.pt")
+                torch.save(best_model_state, checkpoint_path)
+                
+                # Report metrics and checkpoint
+                checkpoint = Checkpoint.from_directory(temp_checkpoint_dir)
+                report({"epoch": i, "train_loss": train_loss, "val_loss": val_loss}, checkpoint=checkpoint)
+        else:
+            # Report metrics only
+            report({"epoch": i, "train_loss": train_loss, "val_loss": val_loss})
 
-        train.report(epoch=i, train_loss=train_loss, val_loss=val_loss)
-
-    return model.module.to("cpu")
+    # Return the best model
+    if best_model_state:
+        from ray.train.torch import get_model
+        model.load_state_dict(best_model_state)
+        
+    return model
