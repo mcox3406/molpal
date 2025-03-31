@@ -424,59 +424,48 @@ def construct_molecule_batch(data: List[MoleculeDatapoint]) -> MoleculeDataset:
 
 
 class MoleculeDataLoader(DataLoader):
-    """A :class:`MoleculeDataLoader` is a PyTorch :class:`DataLoader` for loading a :class:`MoleculeDataset`."""
+    """A :class:`MoleculeDataLoader` is a PyTorch :class:`DataLoader` that loads
+    :class:`MoleculeDatapoint`s from a :class:`MoleculeDataset`."""
 
     def __init__(
         self,
         dataset: MoleculeDataset,
         batch_size: int = 50,
         num_workers: int = 8,
-        class_balance: bool = False,
-        shuffle: bool = False,
-        seed: int = 0,
-        pin_memory: bool = False,
+        pin_memory: bool = True,
+        shuffle: bool = True,
+        drop_last: bool = False,
+        sampler = None,
+        batch_sampler = None,
+        **kwargs
     ):
         """
-        :param dataset: The :class:`MoleculeDataset` containing the molecules
-            to load.
-        :param batch_size: Batch size.
-        :param num_workers: Number of workers used to build batches.
-        :param class_balance: Whether to perform class balancing (i.e., use an
-            equal number of positive and negative molecules). Class balance is
-            only available for single task classification datasets. Set shuffle
-            to True in order to get a random subset of the larger class.
+        :param dataset: The :class:`MoleculeDataset` containing the :class:`MoleculeDatapoint`s.
+        :param batch_size: The batch size.
+        :param num_workers: The number of workers to use to load the data.
+        :param pin_memory: Whether to pin the memory.
         :param shuffle: Whether to shuffle the data.
-        :param seed: Random seed. Only needed if shuffle is True.
+        :param drop_last: Whether to drop the last incomplete batch.
+        :param sampler: Optional sampler for the data.
+        :param batch_sampler: Optional batch sampler for the data.
+        :param kwargs: Additional arguments to pass to the DataLoader.
         """
-        self._dataset = dataset
-        self._batch_size = batch_size
-        self._num_workers = num_workers
-        self._class_balance = class_balance
-        self._shuffle = shuffle
-        self._seed = seed
-        self._context = None
-        self._timeout = 0
-        is_main_thread = threading.current_thread() is threading.main_thread()
-        if not is_main_thread and self._num_workers > 0:
-            self._context = "forkserver"  # In order to prevent a hanging
-            self._timeout = 3600  # Just for sure that the DataLoader won't hang
-
-        self._sampler = MoleculeSampler(
-            dataset=self._dataset,
-            class_balance=self._class_balance,
-            shuffle=self._shuffle,
-            seed=self._seed,
-        )
+        self.dataset = dataset
+        
+        # filter out any collate_fn that might be in kwargs to avoid conflicts
+        kwargs_filtered = {k: v for k, v in kwargs.items() if k != 'collate_fn'}
 
         super().__init__(
-            dataset=self._dataset,
-            batch_size=self._batch_size,
-            sampler=self._sampler,
-            num_workers=self._num_workers,
+            dataset=dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
             collate_fn=construct_molecule_batch,
-            multiprocessing_context=self._context,
-            timeout=self._timeout,
             pin_memory=pin_memory,
+            shuffle=shuffle,
+            drop_last=drop_last,
+            sampler=sampler,
+            batch_sampler=batch_sampler,
+            **kwargs_filtered
         )
 
     @property

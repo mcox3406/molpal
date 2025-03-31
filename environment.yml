@@ -5,16 +5,16 @@ channels:
   - defaults
 
 dependencies:
-  - cudatoolkit=11.3
-  - python=3.8
-  - pytorch::pytorch >=1.10
+  - cudatoolkit=11.8
+  - python=3.11
+  - pytorch=2.6.0
   - pip
   - pip:
     - configargparse
     - h5py
     - numpy
-    - ray >= 1.11
-    - ray[tune]
+    - ray==2.44.1
+    - ray[tune]==2.44.1
     - rdkit
     - pytorch-lightning
     - scikit-learn
