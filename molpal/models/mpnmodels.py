@@ -326,6 +326,20 @@ class MPNN:
         Y_pred = np.concatenate(Y_pred_batches)
 
         if self.scaler is not None:
+            if not isinstance(self.scaler.means, np.ndarray):
+                try:
+                    self.scaler.means = np.array(self.scaler.means, dtype=float)
+                except (ValueError, TypeError) as e:
+                    raise TypeError(f"Failed to convert scaler means to numpy array: {e}") from e
+            if not isinstance(self.scaler.stds, np.ndarray):
+                try:
+                    raw_stds = np.array(self.scaler.stds, dtype=float)
+                    # replace non-positive standard deviations with 1.0 to avoid division by zero
+                    raw_stds[raw_stds <= 0] = 1.0
+                    self.scaler.stds = raw_stds
+                except (ValueError, TypeError) as e:
+                    raise TypeError(f"Failed to convert scaler stds to numpy array: {e}") from e
+
             if self.uncertainty == "mve":
                 Y_pred[:, 0::2] = Y_pred[:, 0::2] * self.scaler.stds + self.scaler.means
                 Y_pred[:, 1::2] *= self.scaler.stds**2
@@ -358,7 +372,11 @@ class MPNN:
     def load(self, path):
         state = json.load(open(path, "r"))
 
-        self.model.load_state_dict(torch.load(state["model_path"]))
+        state_dir = Path(path).parent
+        model_filename = Path(state["model_path"]).name
+        correct_model_path = state_dir / model_filename
+
+        self.model.load_state_dict(torch.load(correct_model_path))
         try:
             self.scaler = StandardScaler(state["means"], state["stds"])
         except KeyError:
