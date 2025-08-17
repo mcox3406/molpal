@@ -218,7 +218,7 @@ def add_objective_args(parser: ArgumentParser):
         "-o",
         "--objective",
         required=True,
-        choices={"lookup", "docking"},
+        choices={"lookup", "docking", "boltz"},
         help="the objective function to use",
     )
     parser.add_argument(

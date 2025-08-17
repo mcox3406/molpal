@@ -13,5 +13,9 @@ def objective(objective, objective_config: str, **kwargs) -> Type[Objective]:
         from molpal.objectives.lookup import LookupObjective
 
         return LookupObjective(objective_config, **kwargs)
+    if objective == "boltz":
+        from molpal.objectives.boltz import BoltzObjective
+
+        return BoltzObjective(objective_config, **kwargs)
 
     raise NotImplementedError(f'Unrecognized objective: "{objective}"')
